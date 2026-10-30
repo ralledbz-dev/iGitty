@@ -27,9 +27,10 @@ Die Trennleiste zwischen den Seiten ist verschiebbar. Über **Ansicht → Fenste
 | F6 | Git-Bundle-Backup erstellen |
 | F7 | Lokalen Ordner wählen |
 | F8 | GitHub-Repository nach ausdrücklicher Namensbestätigung löschen |
+| F9 | Ausgewähltes GitHub-Repository als Gitea-Pull-Mirror anlegen |
 | Strg+R | GitHub-Repositories aktualisieren |
 
-Bei ZIPs und Git-Backups wird der rechts geöffnete lokale Ordner als Speicherziel vorgeschlagen. Der Speicherdialog bleibt erhalten; nichts wird ungefragt überschrieben. Nach dem Download wird die lokale Ansicht aktualisiert. **Es gibt keine automatische Synchronisation, keinen lokalen Upload und kein Verschieben oder Löschen lokaler Dateien.** Die Tastenbelegung ist iGitty-spezifisch und keine vollständige Nachbildung von Total Commander.
+Bei ZIPs und Git-Backups wird der rechts geöffnete lokale Ordner als Speicherziel vorgeschlagen. Der Speicherdialog bleibt erhalten; nichts wird ungefragt überschrieben. Nach dem Download wird die lokale Ansicht aktualisiert. **Es gibt keine automatische Synchronisation lokaler Ordner, keinen lokalen Upload und kein Verschieben oder Löschen lokaler Dateien.** Gitea-Pull-Mirrors werden separat und nur nach Bestätigung angelegt. Die Tastenbelegung ist iGitty-spezifisch und keine vollständige Nachbildung von Total Commander.
 
 ## Funktionen
 
@@ -45,7 +46,21 @@ Bei ZIPs und Git-Backups wird der rechts geöffnete lokale Ordner als Speicherzi
 
 Erstelle einen Fine-grained Personal Access Token und beschränke ihn auf die gewünschten Repositories. Für die angebotenen Funktionen werden die Repository-Berechtigungen **Contents: Read and write** und **Administration: Read and write** benötigt. GitHub kann für Organisationen zusätzliche Freigabe verlangen. Verwende möglichst den kleinstmöglichen Zugriff.
 
-Der Token wird nur im Arbeitsspeicher gehalten. Er wird weder in Dateien noch in Anwendungseinstellungen gespeichert und beim Trennen oder Schließen der App verworfen. Für Git-Backups wird die Authentifizierung nur dem gestarteten Git-Prozess über dessen Umgebung übergeben; sie landet nicht in der Backup-Datei.
+Die App hält den GitHub-Token nur im Arbeitsspeicher und speichert ihn weder in Dateien noch in Anwendungseinstellungen. Für Git-Backups wird die Authentifizierung nur dem gestarteten Git-Prozess über dessen Umgebung übergeben; sie landet nicht in der Backup-Datei. **Ausnahme bei Gitea-Pull-Mirrors:** Wenn du der Token-Übergabe ausdrücklich zustimmst, wird der GitHub-Token an deinen lokalen Gitea-Server übergeben und dort für künftige Abgleiche gespeichert. Das Trennen von GitHub in iGitty entfernt ihn nicht aus Gitea.
+
+## GitHub nach Gitea spiegeln
+
+Ziel ist dein lokaler Gitea-Server unter **http://127.0.0.1:3000**. `127.0.0.1` bezeichnet den Rechner, auf dem iGitty läuft. Die Umgebungsvariable **`DBZS_HOME_API_TOKEN`** muss beim Start der App einen gültigen Gitea-API-Token enthalten. Die App liest ihn aus der Umgebung; er wird weder abgefragt noch in die EXE eingebaut oder von der App gespeichert. Der Token benötigt Zugriff auf das Zielkonto und das Erstellen bzw. Lesen von Repositories. Bei eingeschränkten Gitea-Tokens sind dafür typischerweise `read:user` und `write:repository` nötig; zusätzliche Serverregeln können gelten.
+
+1. Prüfe unter **Gitea → Verbindung prüfen** die Anmeldung am lokalen Server.
+2. Wähle links ein GitHub-Repository und drücke **F9 → Gitea**.
+3. Prüfe Zielkonto und Repository-Name. Das angemeldete Gitea-Konto ist vorausgewählt; eine Organisation ist möglich, wenn dein Token dort Repositories erstellen darf. Das Ziel ist standardmäßig privat; bei einer privaten Quelle ist ein öffentliches Ziel gesperrt.
+4. Für öffentliche Quellen ist kein GitHub-Token nötig. Für private Quellen musst du der Übergabe des aktuell verwendeten GitHub-Tokens an Gitea ausdrücklich zustimmen. Nutze dafür einen möglichst eng beschränkten Token mit Lesezugriff auf die Quelle.
+5. Bestätige mit **Pull-Mirror anlegen**. Bereits vorhandene Ziel-Repositories werden abgelehnt, nicht überschrieben und nicht automatisch umgewandelt.
+
+Gitea ruft danach selbst periodisch Änderungen von GitHub ab, auch wenn iGitty geschlossen ist. Das Intervall richtet sich nach dem Serverstandard; es lässt sich in den Mirror-Einstellungen von Gitea ändern. Die Spiegelung ist einseitig **GitHub → Gitea** und umfasst Git-Branches, Tags und Commits, nicht Issues, Pull Requests, Releases, Einstellungen oder lokale Ordner. Es erfolgt kein Push nach GitHub. Bei einem Timeout ist das Ergebnis möglicherweise unklar: Prüfe erst das Ziel in Gitea, bevor du erneut startest. Deaktiviere oder entferne den Mirror in Gitea, um weitere Abgleiche zu beenden; verwalte dort auch gespeicherte GitHub-Zugangsdaten.
+
+Die Funktion ist für die Ausführung auf deinem Rechner vorgesehen. Ein echter Verbindungstest mit deinem lokalen Server ist nur dort möglich. Die mitgelieferten Tests verwenden ausschließlich simulierte API-Antworten. Hintergrund: [Gitea-Dokumentation zu Pull-Mirrors](https://docs.gitea.com/usage/repository/repo-mirror/).
 
 ## Windows-Executable erstellen
 

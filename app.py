@@ -44,6 +44,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gitea_client import GITEA_BASE_URL, GiteaClient, GiteaError
+from gitea_dialog import GiteaMirrorDialog
 from local_panel import LocalFilesPane
 
 APP_NAME = "iGitty"
@@ -157,6 +159,10 @@ class GitHubClient:
         if not isinstance(user, dict) or not user.get("login"):
             raise GitHubError("GitHub hat kein gültiges Benutzerprofil zurückgegeben.")
         return user
+
+    def token_for_mirror(self) -> str:
+        """Only use after explicit consent to transfer this token to Gitea."""
+        return self._token
 
     def list_repositories(self) -> list[dict]:
         path = "/user/repos"
@@ -651,6 +657,7 @@ class MainWindow(QMainWindow):
         self.pool.setMaxThreadCount(4)
         self._workers: set[Worker] = set()
         self.api: GitHubClient | None = None
+        self._gitea_busy = False
         self.repositories: list[dict] = []
         self.filtered_repositories: list[dict] = []
         self.setStatusBar(QStatusBar())
@@ -722,6 +729,10 @@ class MainWindow(QMainWindow):
         self.delete_button = self.action_button(
             "F8 Repo löschen", self.delete_selected, danger=True
         )
+        self.mirror_button = self.action_button("F9 → Gitea", self.mirror_selected)
+        self.mirror_button.setToolTip(
+            "Ausgewähltes GitHub-Repository als Pull-Mirror in Gitea anlegen. Kein Überschreiben vorhandener Repositories."
+        )
         for key, button in (
             ("F3", self.files_button),
             ("F4", self.details_button),
@@ -729,6 +740,7 @@ class MainWindow(QMainWindow):
             ("F6", self.backup_button),
             ("F7", folder_button),
             ("F8", self.delete_button),
+            ("F9", self.mirror_button),
         ):
             button.setShortcut(QKeySequence(key))
             actions.addWidget(button, 1)
@@ -740,7 +752,6 @@ class MainWindow(QMainWindow):
         )
         root_layout.addLayout(actions)
         self.setCentralWidget(root)
-        self.update_action_state()
 
         github_menu = self.menuBar().addMenu("GitHub")
         refresh_action = QAction("Repositories aktualisieren", self)
@@ -757,6 +768,18 @@ class MainWindow(QMainWindow):
         quit_action.setShortcut(QKeySequence("Alt+F4"))
         quit_action.triggered.connect(self.close)
         github_menu.addAction(quit_action)
+        gitea_menu = self.menuBar().addMenu("Gitea")
+        check_gitea = QAction("Verbindung prüfen", self)
+        check_gitea.triggered.connect(self.check_gitea_connection)
+        gitea_menu.addAction(check_gitea)
+        self.mirror_action = QAction("Ausgewähltes Repository spiegeln…", self)
+        self.mirror_action.triggered.connect(self.mirror_selected)
+        gitea_menu.addAction(self.mirror_action)
+        open_gitea = QAction("Gitea im Browser öffnen", self)
+        open_gitea.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl(GITEA_BASE_URL))
+        )
+        gitea_menu.addAction(open_gitea)
         local_menu = self.menuBar().addMenu("Lokal")
         for caption, slot in (
             ("Ordner wählen…", self.local_pane.choose_directory),
@@ -772,8 +795,9 @@ class MainWindow(QMainWindow):
         equal.triggered.connect(lambda: self.splitter.setSizes([self.width() // 2] * 2))
         view_menu.addAction(equal)
         self.statusBar().showMessage(
-            "Links: GitHub · Rechts: lokales Dateisystem · Keine automatische Synchronisation"
+            "Links: GitHub · Rechts: lokale Ordner · F9: Gitea-Pull-Mirror nach Bestätigung"
         )
+        self.update_action_state()
 
     def build_login_page(self) -> QWidget:
         page = QWidget()
@@ -813,7 +837,7 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(help_link)
         note = QLabel(
-            "Fine-grained Token auf die gewünschten Repositories beschränken: Contents und Administration jeweils Read and write. Der Token bleibt nur im Arbeitsspeicher und wird beim Trennen verworfen."
+            "Fine-grained Token auf die gewünschten Repositories beschränken: Contents und Administration jeweils Read and write. Die App speichert den Token nicht. Eine Übergabe an Gitea für Pull-Mirrors erfordert deine gesonderte Zustimmung."
         )
         note.setObjectName("smallNote")
         note.setWordWrap(True)
@@ -1000,7 +1024,8 @@ class MainWindow(QMainWindow):
         self.token_input.clear()
         self.render_repositories()
         self.statusBar().showMessage(
-            "Getrennt · Zugangsdaten wurden aus dem Arbeitsspeicher verworfen", 6000
+            "GitHub getrennt · Bereits eingerichtete Gitea-Spiegel bleiben bestehen",
+            6000,
         )
 
     def load_repositories(self, show_message: bool = False) -> None:
@@ -1101,6 +1126,9 @@ class MainWindow(QMainWindow):
             self.delete_button,
         ):
             button.setEnabled(enabled)
+        mirror_enabled = enabled and self.api is not None and not self._gitea_busy
+        self.mirror_button.setEnabled(mirror_enabled)
+        self.mirror_action.setEnabled(mirror_enabled)
 
     def open_repository_url(self) -> None:
         repo = self.selected_repository()
@@ -1180,6 +1208,99 @@ class MainWindow(QMainWindow):
             operation,
             done,
             message="Lade ZIP-Archiv …" if kind == "zip" else "Erstelle Git-Backup …",
+        )
+
+    def gitea_from_environment(self) -> GiteaClient | None:
+        try:
+            return GiteaClient.from_environment()
+        except (GiteaError, ValueError) as error:
+            QMessageBox.warning(self, "Gitea-Zugang fehlt", str(error))
+            return None
+
+    def set_gitea_busy(self, busy: bool) -> None:
+        self._gitea_busy = busy
+        self.update_action_state()
+
+    def gitea_failed(self, error: Exception) -> None:
+        self.set_gitea_busy(False)
+        QMessageBox.critical(self, "Gitea-Anfrage fehlgeschlagen", str(error))
+
+    def check_gitea_connection(self) -> None:
+        if self._gitea_busy:
+            return
+        client = self.gitea_from_environment()
+        if client is None:
+            return
+        self.set_gitea_busy(True)
+
+        def connected(user: dict) -> None:
+            self.set_gitea_busy(False)
+            QMessageBox.information(
+                self,
+                "Gitea verbunden",
+                f"{GITEA_BASE_URL}\nAngemeldet als: {user['login']}\n\n"
+                "Der Gitea-Token stammt aus DBZS_HOME_API_TOKEN und wird von der App nicht gespeichert.",
+            )
+
+        self.run_task(
+            client.get_user,
+            connected,
+            self.gitea_failed,
+            "Prüfe lokale Gitea-Verbindung …",
+        )
+
+    def mirror_selected(self) -> None:
+        repo = self.selected_repository()
+        if self._gitea_busy or not repo or self.api is None:
+            return
+        client = self.gitea_from_environment()
+        if client is None:
+            return
+        github_client = self.api
+        self.set_gitea_busy(True)
+
+        def ready(user: dict) -> None:
+            dialog = GiteaMirrorDialog(self, repo, user["login"])
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                self.set_gitea_busy(False)
+                return
+            values = dialog.values()
+            github_token = (
+                github_client.token_for_mirror()
+                if values["include_github_token"]
+                else None
+            )
+
+            def created(_result: dict) -> None:
+                self.set_gitea_busy(False)
+                target = f"{values['target_owner']}/{values['target_name']}"
+                QMessageBox.information(
+                    self,
+                    "Gitea-Pull-Mirror angelegt",
+                    f"Ziel: {GITEA_BASE_URL}/{target}\n\n"
+                    "Gitea übernimmt den weiteren periodischen Abruf von GitHub nach dem Serverstandard. "
+                    "Die Dauer des ersten Imports hängt vom Repository ab. "
+                    "Gespiegelt werden Git-Branches, Tags und Commits; GitHub und lokale Ordner bleiben unverändert.",
+                )
+
+            self.run_task(
+                lambda: client.create_mirror(
+                    repo,
+                    values["target_owner"],
+                    values["target_name"],
+                    private=values["private"],
+                    github_token=github_token,
+                ),
+                created,
+                self.gitea_failed,
+                "Gitea legt den Pull-Mirror an …",
+            )
+
+        self.run_task(
+            client.get_user,
+            ready,
+            self.gitea_failed,
+            "Prüfe Gitea-Zielkonto …",
         )
 
     def delete_selected(self) -> None:
