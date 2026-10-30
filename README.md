@@ -55,6 +55,10 @@ Die EXE enthält Python und PySide6; auf dem Zielrechner ist keine Python-Instal
 
 Ein Windows-Programm kann nicht zuverlässig als Windows-EXE auf Linux erzeugt werden. Daher wird die EXE mit dem mitgelieferten Build-Skript direkt unter Windows gebaut.
 
+### Automatischer Build und Download
+
+Bei jedem Push auf `main` baut GitHub Actions die Windows-EXE und führt zuvor die Tests aus. Zum Herunterladen öffne im Repository **Actions → Windows-EXE → den neuesten erfolgreichen Lauf** und lade unter **Artifacts** `iGitty-Windows-x64` herunter. GitHub stellt das Artefakt als ZIP bereit; entpacke es, um `iGitty.exe` zu erhalten. Artefakte bleiben 30 Tage verfügbar. Ein Build lässt sich außerdem unter **Actions → Windows-EXE → Run workflow** manuell starten.
+
 ## Tests
 
 ```bash
