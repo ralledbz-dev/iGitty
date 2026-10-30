@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 import requests
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSplitter,
     QStackedWidget,
     QStatusBar,
     QTableWidget,
@@ -42,6 +43,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from local_panel import LocalFilesPane
 
 APP_NAME = "iGitty"
 API_ROOT = "https://api.github.com"
@@ -642,8 +645,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} — GitHub Repository Manager")
-        self.resize(1180, 780)
-        self.setMinimumSize(900, 620)
+        self.resize(1320, 780)
+        self.setMinimumSize(1040, 600)
         self.pool = QThreadPool.globalInstance()
         self.pool.setMaxThreadCount(4)
         self._workers: set[Worker] = set()
@@ -659,20 +662,17 @@ class MainWindow(QMainWindow):
     def build_ui(self) -> None:
         root = QWidget()
         root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(30, 20, 30, 22)
-        root_layout.setSpacing(18)
+        root_layout.setContentsMargins(5, 5, 5, 5)
+        root_layout.setSpacing(5)
         header = QHBoxLayout()
         brand = QLabel("iGitty")
         brand.setObjectName("brand")
-        subtitle = QLabel("GITHUB REPOSITORY MANAGER")
-        subtitle.setObjectName("brandSub")
-        brand_box = QVBoxLayout()
-        brand_box.setSpacing(0)
-        brand_box.addWidget(brand)
-        brand_box.addWidget(subtitle)
-        header.addLayout(brand_box)
+        header.addWidget(brand)
+        subtitle = QLabel("GitHub links  |  Lokale Ordner rechts")
+        subtitle.setObjectName("muted")
+        header.addWidget(subtitle)
         header.addStretch(1)
-        self.connection_label = QLabel("Nicht verbunden")
+        self.connection_label = QLabel("GitHub: nicht verbunden")
         self.connection_label.setObjectName("connectionState")
         header.addWidget(self.connection_label)
         self.disconnect_button = QPushButton("Trennen")
@@ -681,230 +681,224 @@ class MainWindow(QMainWindow):
         header.addWidget(self.disconnect_button)
         root_layout.addLayout(header)
 
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setObjectName("commanderSplitter")
+        self.splitter.setChildrenCollapsible(False)
+        online = QFrame()
+        online.setObjectName("onlinePane")
+        online_layout = QVBoxLayout(online)
+        online_layout.setContentsMargins(1, 1, 1, 1)
+        online_layout.setSpacing(4)
+        title = QLabel("LINKS · GITHUB / ONLINE")
+        title.setObjectName("paneTitle")
+        online_layout.addWidget(title)
         self.pages = QStackedWidget()
         self.login_page = self.build_login_page()
         self.manager_page = self.build_manager_page()
         self.pages.addWidget(self.login_page)
         self.pages.addWidget(self.manager_page)
-        root_layout.addWidget(self.pages, 1)
+        online_layout.addWidget(self.pages, 1)
+        self.local_pane = LocalFilesPane()
+        self.splitter.addWidget(online)
+        self.splitter.addWidget(self.local_pane)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([650, 650])
+        root_layout.addWidget(self.splitter, 1)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(4)
+        self.files_button = self.action_button("F3 Dateien", self.open_files)
+        self.details_button = self.action_button("F4 Details", self.edit_metadata)
+        self.zip_button = self.action_button(
+            "F5 ZIP →", lambda: self.download_selected("zip")
+        )
+        self.backup_button = self.action_button(
+            "F6 Backup →", lambda: self.download_selected("bundle")
+        )
+        folder_button = self.action_button(
+            "F7 Ordner wählen", self.local_pane.choose_directory
+        )
+        self.delete_button = self.action_button(
+            "F8 Repo löschen", self.delete_selected, danger=True
+        )
+        for key, button in (
+            ("F3", self.files_button),
+            ("F4", self.details_button),
+            ("F5", self.zip_button),
+            ("F6", self.backup_button),
+            ("F7", folder_button),
+            ("F8", self.delete_button),
+        ):
+            button.setShortcut(QKeySequence(key))
+            actions.addWidget(button, 1)
+        self.zip_button.setToolTip(
+            "GitHub-Repository als ZIP speichern. Zielvorschlag: rechter Ordner. Keine automatische Synchronisation."
+        )
+        self.backup_button.setToolTip(
+            "Git-Bundle des ausgewählten Online-Repositories im rechten Ordner speichern."
+        )
+        root_layout.addLayout(actions)
         self.setCentralWidget(root)
+        self.update_action_state()
+
+        github_menu = self.menuBar().addMenu("GitHub")
+        refresh_action = QAction("Repositories aktualisieren", self)
+        refresh_action.setShortcut(QKeySequence("Ctrl+R"))
+        refresh_action.triggered.connect(
+            lambda: self.load_repositories(show_message=True)
+        )
+        github_menu.addAction(refresh_action)
+        disconnect_action = QAction("Verbindung trennen", self)
+        disconnect_action.triggered.connect(self.disconnect)
+        github_menu.addAction(disconnect_action)
+        github_menu.addSeparator()
+        quit_action = QAction("Beenden", self)
+        quit_action.setShortcut(QKeySequence("Alt+F4"))
+        quit_action.triggered.connect(self.close)
+        github_menu.addAction(quit_action)
+        local_menu = self.menuBar().addMenu("Lokal")
+        for caption, slot in (
+            ("Ordner wählen…", self.local_pane.choose_directory),
+            ("Übergeordneter Ordner", self.local_pane.go_up),
+            ("Aktualisieren", self.local_pane.refresh),
+            ("Auswahl öffnen", self.local_pane.open_selected),
+        ):
+            action = QAction(caption, self)
+            action.triggered.connect(slot)
+            local_menu.addAction(action)
+        view_menu = self.menuBar().addMenu("Ansicht")
+        equal = QAction("Fensterhälften gleich breit", self)
+        equal.triggered.connect(lambda: self.splitter.setSizes([self.width() // 2] * 2))
+        view_menu.addAction(equal)
+        self.statusBar().showMessage(
+            "Links: GitHub · Rechts: lokales Dateisystem · Keine automatische Synchronisation"
+        )
 
     def build_login_page(self) -> QWidget:
         page = QWidget()
-        layout = QHBoxLayout(page)
-        layout.setContentsMargins(36, 42, 36, 42)
-        layout.setSpacing(54)
-        intro = QVBoxLayout()
-        intro.addStretch(1)
-        eyebrow = QLabel("DEIN GITHUB. ÜBERSICHTLICH.")
-        eyebrow.setObjectName("eyebrow")
-        intro.addWidget(eyebrow)
-        heading = QLabel("Alle Repositories.\nEin klarer Überblick.")
-        heading.setObjectName("heroTitle")
-        intro.addWidget(heading)
-        lead = QLabel(
-            "Verwalte deine GitHub-Projekte an einem Ort: Dateien bearbeiten, Archive herunterladen und vollständige Git-Backups erstellen."
-        )
-        lead.setObjectName("heroLead")
-        lead.setWordWrap(True)
-        intro.addWidget(lead)
-        intro.addSpacing(16)
-        features = QLabel(
-            "↓  ZIP-Download       ↗  Dateien bearbeiten       ◈  Git-Backups"
-        )
-        features.setObjectName("featureStrip")
-        intro.addWidget(features)
-        intro.addStretch(1)
-        layout.addLayout(intro, 6)
-
-        card = QFrame()
-        card.setObjectName("connectCard")
-        card.setMinimumWidth(370)
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(28, 28, 28, 26)
-        card_layout.setSpacing(12)
-        cap = QLabel("VERBINDUNG")
-        cap.setObjectName("eyebrow")
-        card_layout.addWidget(cap)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.addStretch(1)
         title = QLabel("Mit GitHub verbinden")
         title.setObjectName("sectionTitle")
-        card_layout.addWidget(title)
+        layout.addWidget(title)
         body = QLabel(
-            "Dein Personal Access Token wird nur im Arbeitsspeicher gehalten und beim Trennen oder Beenden verworfen."
+            "Deine Online-Repositories erscheinen hier links. Die lokalen Ordner rechts sind auch ohne Anmeldung nutzbar."
         )
-        body.setObjectName("muted")
         body.setWordWrap(True)
-        card_layout.addWidget(body)
-        card_layout.addSpacing(5)
-        card_layout.addWidget(QLabel("GitHub Personal Access Token"))
+        layout.addWidget(body)
+        layout.addSpacing(12)
+        layout.addWidget(QLabel("GitHub Personal Access Token"))
         self.token_input = QLineEdit()
         self.token_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.token_input.setPlaceholderText("github_pat_…")
         self.token_input.setClearButtonEnabled(True)
         self.token_input.returnPressed.connect(self.connect_github)
-        card_layout.addWidget(self.token_input)
-        self.connect_button = QPushButton("Sicher verbinden   →")
+        layout.addWidget(self.token_input)
+        self.connect_button = QPushButton("Sicher verbinden")
         self.connect_button.setObjectName("primaryButton")
         self.connect_button.clicked.connect(self.connect_github)
-        card_layout.addWidget(self.connect_button)
+        layout.addWidget(self.connect_button)
         self.token_error = QLabel("")
         self.token_error.setObjectName("errorLabel")
         self.token_error.setWordWrap(True)
         self.token_error.hide()
-        card_layout.addWidget(self.token_error)
-        help_link = QPushButton("Token bei GitHub erstellen ↗")
-        help_link.setObjectName("linkButton")
+        layout.addWidget(self.token_error)
+        help_link = QPushButton("Token bei GitHub erstellen")
         help_link.clicked.connect(
             lambda: QDesktopServices.openUrl(
                 QUrl("https://github.com/settings/personal-access-tokens/new")
             )
         )
-        card_layout.addWidget(help_link, alignment=Qt.AlignmentFlag.AlignLeft)
-        permissions = QLabel(
-            "Empfohlen: Fine-grained Token, beschränkt auf die gewünschten Repositories. Benötigt: Contents (Read and write) und Administration (Read and write)."
+        layout.addWidget(help_link)
+        note = QLabel(
+            "Fine-grained Token auf die gewünschten Repositories beschränken: Contents und Administration jeweils Read and write. Der Token bleibt nur im Arbeitsspeicher und wird beim Trennen verworfen."
         )
-        permissions.setObjectName("smallNote")
-        permissions.setWordWrap(True)
-        card_layout.addWidget(permissions)
-        security = QLabel(
-            "●  Läuft lokal auf diesem Computer · Token wird nicht gespeichert"
-        )
-        security.setObjectName("securityNote")
-        security.setWordWrap(True)
-        card_layout.addWidget(security)
-        card_layout.addStretch(1)
-        layout.addWidget(card, 4, alignment=Qt.AlignmentFlag.AlignVCenter)
+        note.setObjectName("smallNote")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch(1)
         return page
 
     def build_manager_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(12, 6, 12, 0)
-        layout.setSpacing(16)
-        intro = QHBoxLayout()
-        text = QVBoxLayout()
-        eyebrow = QLabel("REPOSITORY-BIBLIOTHEK")
-        eyebrow.setObjectName("eyebrow")
-        text.addWidget(eyebrow)
-        title = QLabel("Deine Projekte.")
-        title.setObjectName("pageTitle")
-        text.addWidget(title)
-        self.welcome_label = QLabel("")
-        self.welcome_label.setObjectName("muted")
-        text.addWidget(self.welcome_label)
-        intro.addLayout(text)
-        intro.addStretch(1)
-        layout.addLayout(intro)
-
-        stats = QHBoxLayout()
-        self.stat_total = self.make_stat(stats, "REPOSITORIES")
-        self.stat_public = self.make_stat(stats, "ÖFFENTLICH")
-        self.stat_private = self.make_stat(stats, "PRIVAT")
-        self.stat_recent = self.make_stat(stats, "LETZTE 30 TAGE")
-        layout.addLayout(stats)
-
-        toolbar = QHBoxLayout()
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("⌕   Nach Repository suchen …")
-        self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.textChanged.connect(self.render_repositories)
-        self.visibility_filter = QComboBox()
-        self.visibility_filter.addItem("Alle Repositories", "all")
-        self.visibility_filter.addItem("Öffentlich", "public")
-        self.visibility_filter.addItem("Privat", "private")
-        self.visibility_filter.currentIndexChanged.connect(self.render_repositories)
-        self.refresh_button = QPushButton("⟳  Aktualisieren")
+        layout.setContentsMargins(4, 0, 4, 4)
+        layout.setSpacing(4)
+        path_bar = QHBoxLayout()
+        self.welcome_label = QLabel("github://")
+        self.welcome_label.setObjectName("remotePath")
+        path_bar.addWidget(self.welcome_label, 1)
+        self.refresh_button = QPushButton("Aktualisieren")
         self.refresh_button.clicked.connect(
             lambda: self.load_repositories(show_message=True)
         )
+        path_bar.addWidget(self.refresh_button)
+        browser_button = QPushButton("GitHub öffnen")
+        browser_button.clicked.connect(self.open_repository_url)
+        path_bar.addWidget(browser_button)
+        layout.addLayout(path_bar)
+        toolbar = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Repositories filtern…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self.render_repositories)
+        self.visibility_filter = QComboBox()
+        self.visibility_filter.addItem("Alle", "all")
+        self.visibility_filter.addItem("Öffentlich", "public")
+        self.visibility_filter.addItem("Privat", "private")
+        self.visibility_filter.currentIndexChanged.connect(self.render_repositories)
         toolbar.addWidget(self.search_edit, 1)
         toolbar.addWidget(self.visibility_filter)
-        toolbar.addWidget(self.refresh_button)
         layout.addLayout(toolbar)
-
         self.table = QTableWidget(0, 6)
+        self.table.setObjectName("onlineFilesView")
         self.table.setHorizontalHeaderLabels(
-            [
-                "Repository",
-                "Beschreibung",
-                "Sichtbarkeit",
-                "Sprache",
-                "★",
-                "Aktualisiert",
-            ]
+            ["Repository", "Beschreibung", "Typ", "Sprache", "★", "Geändert"]
         )
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(False)
         self.table.verticalHeader().hide()
+        self.table.verticalHeader().setDefaultSectionSize(24)
         self.table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents
+            QHeaderView.ResizeMode.Interactive
         )
+        self.table.setColumnWidth(0, 150)
         self.table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch
         )
-        for column in (2, 3, 4, 5):
-            self.table.horizontalHeader().setSectionResizeMode(
-                column, QHeaderView.ResizeMode.ResizeToContents
-            )
+        self.table.setColumnWidth(2, 90)
+        self.table.setColumnWidth(3, 70)
+        self.table.setColumnWidth(4, 35)
+        self.table.setColumnWidth(5, 95)
         self.table.itemSelectionChanged.connect(self.update_action_state)
-        self.table.cellDoubleClicked.connect(
-            lambda _row, _col: self.open_repository_url()
-        )
+        self.table.cellDoubleClicked.connect(lambda _row, _col: self.open_files())
         layout.addWidget(self.table, 1)
-
         self.empty_label = QLabel(
-            "Noch keine passenden Repositories. Ändere den Suchbegriff oder den Sichtbarkeitsfilter."
+            "Keine passenden Repositories. Suchbegriff oder Filter ändern."
         )
         self.empty_label.setObjectName("muted")
-        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setWordWrap(True)
         self.empty_label.hide()
-        layout.addWidget(self.empty_label, 1)
-
-        actions = QHBoxLayout()
-        self.files_button = self.action_button("Dateien bearbeiten", self.open_files)
-        self.details_button = self.action_button("Details", self.edit_metadata)
-        self.zip_button = self.action_button(
-            "ZIP herunterladen ↓", lambda: self.download_selected("zip")
-        )
-        self.backup_button = self.action_button(
-            "Git-Backup ◈", lambda: self.download_selected("bundle")
-        )
-        self.delete_button = self.action_button(
-            "Repository löschen", self.delete_selected, danger=True
-        )
-        for button in (
-            self.files_button,
-            self.details_button,
-            self.zip_button,
-            self.backup_button,
-            self.delete_button,
-        ):
-            actions.addWidget(button)
-        layout.addLayout(actions)
-        for button in (
-            self.files_button,
-            self.details_button,
-            self.zip_button,
-            self.backup_button,
-            self.delete_button,
-        ):
-            button.setEnabled(False)
+        layout.addWidget(self.empty_label)
+        stats = QHBoxLayout()
+        self.stat_total = self.make_stat(stats, "Repos")
+        self.stat_public = self.make_stat(stats, "Öffentlich")
+        self.stat_private = self.make_stat(stats, "Privat")
+        self.stat_recent = self.make_stat(stats, "Aktiv / 30 Tage")
+        layout.addLayout(stats)
         return page
 
     def make_stat(self, layout: QHBoxLayout, label: str) -> QLabel:
-        card = QFrame()
-        card.setObjectName("statCard")
-        box = QVBoxLayout(card)
-        box.setContentsMargins(16, 12, 16, 12)
-        caption = QLabel(label)
-        caption.setObjectName("statCaption")
-        value = QLabel("—")
+        layout.addWidget(QLabel(label + ":"))
+        value = QLabel("0")
         value.setObjectName("statValue")
-        box.addWidget(caption)
-        box.addWidget(value)
-        layout.addWidget(card, 1)
+        layout.addWidget(value)
+        layout.addStretch(1)
         return value
 
     def action_button(
@@ -960,9 +954,7 @@ class MainWindow(QMainWindow):
             self.connection_label.setObjectName("connectedState")
             self.connection_label.style().unpolish(self.connection_label)
             self.connection_label.style().polish(self.connection_label)
-            self.welcome_label.setText(
-                f"Angemeldet als @{user['login']} · wähle ein Projekt, um loszulegen."
-            )
+            self.welcome_label.setText(f"github://{user['login']}/")
             self.disconnect_button.show()
             self.pages.setCurrentWidget(self.manager_page)
             self.load_repositories()
@@ -971,7 +963,7 @@ class MainWindow(QMainWindow):
             self.token_error.setText(str(error))
             self.token_error.show()
             self.connect_button.setEnabled(True)
-            self.connect_button.setText("Sicher verbinden   →")
+            self.connect_button.setText("Sicher verbinden")
 
         def validate() -> dict:
             user = candidate.get_user()
@@ -984,7 +976,7 @@ class MainWindow(QMainWindow):
             self._workers.discard(worker)
             self.statusBar().showMessage("Bereit", 5000)
             self.connect_button.setEnabled(True)
-            self.connect_button.setText("Sicher verbinden   →")
+            self.connect_button.setText("Sicher verbinden")
             if error:
                 failed(error)
             else:
@@ -1006,6 +998,7 @@ class MainWindow(QMainWindow):
         self.disconnect_button.hide()
         self.pages.setCurrentWidget(self.login_page)
         self.token_input.clear()
+        self.render_repositories()
         self.statusBar().showMessage(
             "Getrennt · Zugangsdaten wurden aus dem Arbeitsspeicher verworfen", 6000
         )
@@ -1056,20 +1049,20 @@ class MainWindow(QMainWindow):
         for repo in self.repositories:
             try:
                 updated = datetime.fromisoformat(
-                    (repo.get("updated_at") or "").replace("Z", "+00:00")
-                )  # noqa: FURB162
+                    (repo.get("updated_at") or "").replace("Z", "+00:00")  # noqa: FURB162
+                )
                 recent += updated.timestamp() >= cutoff
             except ValueError:
                 pass
         self.stat_recent.setText(str(recent))
-        self.table.setVisible(bool(filtered))
+        self.table.setVisible(True)
         self.empty_label.setVisible(not filtered)
         self.table.setRowCount(len(filtered))
         for row, repo in enumerate(filtered):
             owner = (repo.get("owner") or {}).get("login", "")
             name_item = QTableWidgetItem(repo.get("name", ""))
             name_item.setToolTip(
-                f"{owner}/{repo.get('name', '')} · Doppelklick öffnet GitHub"
+                f"{owner}/{repo.get('name', '')} · Doppelklick öffnet Repository-Dateien"
             )
             name_item.setData(Qt.ItemDataRole.UserRole, repo)
             values = [
@@ -1086,7 +1079,7 @@ class MainWindow(QMainWindow):
                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                     )
                 self.table.setItem(row, column, item)
-            self.table.setRowHeight(row, 42)
+            self.table.setRowHeight(row, 24)
         if filtered:
             self.table.selectRow(0)
         else:
@@ -1161,7 +1154,7 @@ class MainWindow(QMainWindow):
         destination, _ = QFileDialog.getSaveFileName(
             self,
             "Archiv speichern" if kind == "zip" else "Git-Backup speichern",
-            suggested,
+            str(Path(self.local_pane.current_path()) / suggested),
             "ZIP-Archiv (*.zip)" if kind == "zip" else "Git-Bundle (*.bundle)",
         )
         if not destination:
@@ -1176,6 +1169,7 @@ class MainWindow(QMainWindow):
         )
 
         def done(_result: Any) -> None:
+            self.local_pane.refresh()
             QMessageBox.information(
                 self,
                 "Download abgeschlossen",
@@ -1236,52 +1230,38 @@ class MainWindow(QMainWindow):
 
 
 STYLESHEET = """
-QWidget { background: #11131a; color: #e9eaf0; font-family: 'Segoe UI', 'Inter', sans-serif; font-size: 13px; }
-QMainWindow { background: #11131a; }
-QLabel#brand { color: #f5f5f8; font-size: 25px; font-weight: 750; letter-spacing: -1px; }
-QLabel#brandSub { color: #777d8d; font-size: 9px; font-weight: 700; letter-spacing: 1.6px; }
-QLabel#connectionState, QLabel#connectedState { color: #aeb2bf; background: #1a1c25; border: 1px solid #2b2e39; border-radius: 16px; padding: 8px 13px; }
-QLabel#connectedState { color: #a4e8bd; border-color: #294734; }
-QLabel#eyebrow { color: #a78bfa; font-size: 10px; font-weight: 750; letter-spacing: 1.8px; }
-QLabel#heroTitle { color: #f5f5f8; font-size: 37px; font-weight: 750; letter-spacing: -1.2px; }
-QLabel#heroLead { color: #a2a6b3; font-size: 15px; line-height: 1.45; max-width: 500px; }
-QLabel#featureStrip { color: #d3d4db; font-size: 12px; font-weight: 650; }
-QFrame#connectCard, QFrame#statCard { background: #191b24; border: 1px solid #2c2f3b; border-radius: 15px; }
-QLabel#sectionTitle, QLabel#dialogTitle { color: #f3f3f7; font-size: 22px; font-weight: 720; }
-QLabel#muted { color: #959aa9; }
-QLabel#smallNote { color: #9297a5; font-size: 11px; }
-QLabel#securityNote { color: #8fcda4; font-size: 11px; }
-QLabel#errorLabel { color: #ff9d9d; }
-QLabel#pageTitle { color: #f3f3f7; font-size: 29px; font-weight: 720; }
-QLabel#statCaption { color: #858a98; font-size: 9px; font-weight: 750; letter-spacing: 1px; }
-QLabel#statValue { color: #f2f2f6; font-size: 23px; font-weight: 700; }
-QLineEdit, QPlainTextEdit, QComboBox { background: #10121a; border: 1px solid #343745; border-radius: 8px; padding: 10px 11px; selection-background-color: #7252c9; }
-QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border: 1px solid #8d70e5; }
-QComboBox { min-width: 150px; }
-QComboBox::drop-down { border: 0; width: 26px; }
-QComboBox QAbstractItemView { background: #1b1d27; selection-background-color: #54408e; border: 1px solid #343745; }
-QPushButton { color: #dedfe6; background: #232530; border: 1px solid #353845; border-radius: 8px; padding: 9px 13px; font-weight: 620; }
-QPushButton:hover { background: #2b2e3a; border-color: #4a4e5e; }
-QPushButton:disabled { color: #656a78; background: #1a1c24; border-color: #2a2d37; }
-QPushButton#primaryButton { color: white; background: #7656d8; border: 1px solid #876be1; font-weight: 700; padding: 11px 14px; }
-QPushButton#primaryButton:hover { background: #8769e6; }
-QPushButton#secondaryButton { background: #1a1c25; }
-QPushButton#dangerButton { color: #ffaaaa; background: #25191e; border-color: #57313b; }
-QPushButton#dangerButton:hover { background: #362026; }
-QPushButton#linkButton { color: #b9a6ff; background: transparent; border: 0; padding: 5px 0; text-align: left; }
-QTableWidget { background: #171922; border: 1px solid #2d303b; border-radius: 10px; alternate-background-color: #1a1c25; selection-background-color: #393052; selection-color: #ffffff; outline: 0; }
-QTableWidget::item { padding: 8px; border-bottom: 1px solid #292c36; }
-QHeaderView::section { color: #9398a7; background: #1c1e28; border: 0; border-bottom: 1px solid #343744; padding: 10px 8px; font-size: 10px; font-weight: 750; }
-QListWidget { background: #151720; border: 1px solid #30333e; border-radius: 9px; padding: 5px; }
-QListWidget::item { padding: 11px 9px; border-bottom: 1px solid #282b35; }
-QListWidget::item:selected { background: #332a4c; }
-QDialog { background: #151720; }
-QCheckBox { spacing: 8px; }
-QCheckBox::indicator { width: 17px; height: 17px; }
-QStatusBar { color: #858a98; background: #10121a; border-top: 1px solid #252833; }
-QScrollBar:vertical { background: #14161e; width: 10px; margin: 0; }
-QScrollBar::handle:vertical { background: #414451; border-radius: 4px; min-height: 25px; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QWidget { background: #ece9e1; color: #111111; font-family: 'Segoe UI', sans-serif; font-size: 12px; }
+QMainWindow, QDialog { background: #ece9e1; }
+QLabel#brand { color: #102d6b; font-size: 20px; font-weight: bold; }
+QLabel#muted, QLabel#smallNote { color: #555555; }
+QLabel#smallNote { font-size: 11px; }
+QLabel#sectionTitle, QLabel#dialogTitle { font-size: 20px; font-weight: bold; }
+QLabel#paneTitle { background: #123776; color: white; font-weight: bold; padding: 5px 7px; }
+QLabel#connectionState { color: #555555; padding: 3px; }
+QLabel#connectedState { color: #215b2f; padding: 3px; font-weight: bold; }
+QLabel#remotePath { background: white; border: 1px solid #9a9a9a; padding: 5px; font-family: 'Consolas', monospace; }
+QLabel#statValue { font-weight: bold; }
+QLabel#errorLabel { color: #a01818; }
+QFrame#onlinePane, QWidget#localPane { border: 1px solid #8a8a8a; }
+QPushButton { background: #ece9e1; border: 1px solid #969696; border-top-color: white; border-left-color: white; padding: 5px 9px; border-radius: 0; }
+QPushButton:hover { background: #f7f6f1; border-color: #6a83aa; }
+QPushButton:pressed { background: #d4d1c9; border-color: #777777; }
+QPushButton:disabled { color: #8b8b8b; background: #e5e3dd; }
+QPushButton#primaryButton { background: #123776; color: white; font-weight: bold; }
+QPushButton#dangerButton { color: #8a1515; }
+QLineEdit, QPlainTextEdit, QComboBox { background: white; border: 1px solid #969696; border-radius: 0; padding: 4px; selection-background-color: #123776; selection-color: white; }
+QLineEdit:focus, QPlainTextEdit:focus { border-color: #123776; }
+QComboBox { min-width: 70px; }
+QComboBox QAbstractItemView { background: white; color: black; selection-background-color: #123776; selection-color: white; }
+QTableWidget, QTreeView, QListWidget { background: white; alternate-background-color: white; color: black; border: 1px solid #8a8a8a; border-radius: 0; selection-background-color: #123776; selection-color: white; font-family: 'Consolas', 'Courier New', monospace; outline: 0; }
+QTableWidget::item, QTreeView::item { padding: 2px 4px; border: 0; min-height: 20px; }
+QTableWidget::item:selected, QTreeView::item:selected, QListWidget::item:selected { background: #123776; color: white; }
+QHeaderView::section { background: #ece9e1; color: #111111; border: 1px solid #b2afa7; border-top-color: white; border-left-color: white; padding: 4px; font-weight: normal; }
+QListWidget::item { padding: 4px; }
+QSplitter::handle { background: #c9c6be; width: 6px; }
+QStatusBar { background: #ece9e1; border-top: 1px solid #aaa79f; color: #444444; }
+QMenuBar, QMenu { background: #ece9e1; color: black; }
+QMenuBar::item:selected, QMenu::item:selected { background: #123776; color: white; }
 """
 
 
